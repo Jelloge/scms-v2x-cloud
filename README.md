@@ -2,7 +2,7 @@
 
 **COMP4900 — Real-Time Operating Systems | Carleton University | Winter 2026**
 
-Shirley Huang · Jasmine Jamali · Darnell Foster · Prabhkirat Dhaliwal · Shihao Jia
+Shirley Huang · Jasmine . J · Darnell Foster · Prabhkirat Dhaliwal · Shihao Jia
 
 ---
 
