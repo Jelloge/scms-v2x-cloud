@@ -138,6 +138,58 @@ int request_pseudonym_batch(const char *url, int batch_size) {
     return rc;
 }
 
+/* read the private key back from disk after enrollment so we can
+   hand it to thread 0 for bsm signing. thread 1 calls this after
+   each successful provisioning cycle */
+EVP_PKEY *load_signing_key(const char *key_path) {
+    FILE *f = fopen(key_path, "r");
+    if (!f) return NULL;
+    EVP_PKEY *pkey = PEM_read_PrivateKey(f, NULL, NULL, NULL);
+    fclose(f);
+    return pkey;
+}
+
+/* signs a bsm payload with ecdsa p-256 + sha256 using the EVP_DigestSign api.
+   this is what thread 0 calls every 100ms to simulate a vehicle broadcasting
+   a signed basic safety message (brecht et al section V-B).
+   we call DigestSignFinal twice: first to get the required sig buffer size,
+   then again to actually produce the signature */
+int sign_bsm_payload(EVP_PKEY *key, const unsigned char *payload,
+                     size_t payload_len, unsigned char *sig_out,
+                     size_t *sig_len_out) {
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) return -1;
+
+    if (EVP_DigestSignInit(mdctx, NULL, EVP_sha256(), NULL, key) <= 0) {
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+    if (EVP_DigestSignUpdate(mdctx, payload, payload_len) <= 0) {
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+
+    /* first call with NULL gets us the required buffer length */
+    size_t siglen = 0;
+    if (EVP_DigestSignFinal(mdctx, NULL, &siglen) <= 0) {
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+    if (siglen > *sig_len_out) {
+        EVP_MD_CTX_free(mdctx);
+        return -1;  /* caller's buffer is too small */
+    }
+    /* second call actually writes the signature bytes */
+    if (EVP_DigestSignFinal(mdctx, sig_out, &siglen) <= 0) {
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+
+    *sig_len_out = siglen;
+    EVP_MD_CTX_free(mdctx);
+    return 0;
+}
+
 int run_provisioning_cycle(const char *enroll_url, const char *pseudo_url,
                            pki_cycle_metrics_t *metrics_out) {
     timer_sample_t t = {0};
