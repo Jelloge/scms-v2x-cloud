@@ -16,6 +16,13 @@ typedef struct {
     double last_keygen_ms;
     double last_enroll_ms;
     double last_pseudonym_ms;
+    /* tracks how long each ecdsa sign operation takes in thread 0 */
+    double last_bsm_sign_ms;
+    double max_bsm_sign_ms;
+    /* how long thread 0 blocks waiting on the mutex when thread 1 holds it
+       during cert swap - this shows mutex contention (lecture 5) */
+    double last_mutex_wait_ms;
+    double max_mutex_wait_ms;
 } runtime_metrics_t;
 
 uint64_t monotonic_time_ns(void);
