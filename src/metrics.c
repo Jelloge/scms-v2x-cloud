@@ -21,7 +21,10 @@ int metrics_csv_init(const char *path) {
     FILE *f = fopen(path, "w");
     if (!f) return -1;
     fprintf(f,
-            "timestamp_ns,bsm_cycles,bsm_deadline_miss,provision_ok,provision_fail,last_keygen_ms,last_enroll_ms,last_pseudonym_ms\n");
+            "timestamp_ns,bsm_cycles,bsm_deadline_miss,provision_ok,provision_fail,"
+            "last_keygen_ms,last_enroll_ms,last_pseudonym_ms,"
+            "last_bsm_sign_ms,max_bsm_sign_ms,"
+            "last_mutex_wait_ms,max_mutex_wait_ms\n");
     fclose(f);
     return 0;
 }
@@ -29,7 +32,7 @@ int metrics_csv_init(const char *path) {
 int metrics_csv_append(const char *path, const runtime_metrics_t *m) {
     FILE *f = fopen(path, "a");
     if (!f) return -1;
-    fprintf(f, "%llu,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f\n",
+    fprintf(f, "%llu,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
             (unsigned long long) monotonic_time_ns(),
             (unsigned long long) m->bsm_cycles,
             (unsigned long long) m->bsm_deadline_miss,
@@ -37,7 +40,11 @@ int metrics_csv_append(const char *path, const runtime_metrics_t *m) {
             (unsigned long long) m->provision_fail,
             m->last_keygen_ms,
             m->last_enroll_ms,
-            m->last_pseudonym_ms);
+            m->last_pseudonym_ms,
+            m->last_bsm_sign_ms,
+            m->max_bsm_sign_ms,
+            m->last_mutex_wait_ms,
+            m->max_mutex_wait_ms);
     fclose(f);
     return 0;
 }

@@ -9,7 +9,11 @@
 #include <sys/types.h>
 
 int ensure_cert_store(void) {
+#ifdef _WIN32
+    if (mkdir(CERT_STORE_DIR) == 0 || errno == EEXIST) {
+#else
     if (mkdir(CERT_STORE_DIR, 0700) == 0 || errno == EEXIST) {
+#endif
         return 0;
     }
     perror("mkdir cert_store");
