@@ -149,9 +149,9 @@ EVP_PKEY *load_signing_key(const char *key_path) {
     return pkey;
 }
 
-/* signs a bsm payload with ecdsa p-256 + sha256 using the EVP_DigestSign api.
+/* signs a bsm payload with ecdsa p-256 + sha256 using the EVP_DigestSign api
    this is what thread 0 calls every 100ms to simulate a vehicle broadcasting
-   a signed basic safety message (brecht et al section V-B).
+   a signed basic safety message (the brecht paper section V-B)
    we call DigestSignFinal twice: first to get the required sig buffer size,
    then again to actually produce the signature */
 int sign_bsm_payload(EVP_PKEY *key, const unsigned char *payload,

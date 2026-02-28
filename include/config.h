@@ -15,11 +15,10 @@
 #define BSM_PERIOD_MS 100
 #define PROVISION_PERIOD_SEC 5
 
-/* thread priorities for QNX SCHED_RR (lecture 5). higher number = higher priority.
-   on non-QNX systems these get ignored gracefully */
-#define PRIO_SIGNER    20   /* thread 0 - bsm signer (highest) */
-#define PRIO_PROVISION 15   /* thread 1 - cert provisioning (medium) */
-#define PRIO_MONITOR   10   /* thread 2 - metrics logger (lowest) */
+/* thread priorities for QNX SCHED_RR (lecture 5). higher number = higher prio */
+#define PRIO_SIGNER    20   /* thread 0-bsm signer (highest) */
+#define PRIO_PROVISION 15   /* thread 1-cert provisioning (medium) */
+#define PRIO_MONITOR   10   /* thread 2-metrics logger (lowest) */
 
 /* size of the simulated BSM payload in bytes. real V2X BSMs are
    typically around 200-400 bytes containing position, speed, heading etc */

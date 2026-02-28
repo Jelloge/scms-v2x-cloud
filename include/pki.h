@@ -16,11 +16,11 @@ int request_pseudonym_batch(const char *url, int batch_size);
 int run_provisioning_cycle(const char *enroll_url, const char *pseudo_url,
                            pki_cycle_metrics_t *metrics_out);
 
-/* loads the enrollment private key from a pem file so thread 0 can
-   use it for bsm signing. caller needs to free with EVP_PKEY_free() */
+//loads the enrollment private key from a pem file so thread 0 can
+//  use it for bsm signing. caller needs to free with EVP_PKEY_free()
 EVP_PKEY *load_signing_key(const char *key_path);
 
-/* signs a bsm payload using ecdsa p-256 with sha-256 digest.
+/* signs a bsm payload using ecdsa p-256 with sha-256 digest
    we use the openssl EVP_DigestSign api for this (same pattern as the csr signing).
    returns 0 on success, -1 on any failure */
 int sign_bsm_payload(EVP_PKEY *key, const unsigned char *payload,
