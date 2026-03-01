@@ -1,7 +1,5 @@
 # RTOS Client PKI Start
 
-## What this starter now covers
-
 - Key generation on client (ECDSA P-256)
 - CSR generation and CA enrollment request
 - Pseudonym batch request
