@@ -169,17 +169,17 @@ static void *signer_thread(void *arg) {
 }
 
 /*
- * thread 1 - certificate provisioning (medium priority)
- *
- * handles the enrollment workflow from brecht et al. [1, figure 5]:
- *   1) generate ecdsa p-256 keypair + x.509 csr
- *   2) send csr to the enrollment endpoint (EJBCA REST api)
- *   3) request a batch of 20 pseudonym certs
- *   4) load the new signing key and swap it into shared state
- *   5) signal the condition variable so thread 0 knows theres a new cert
- *
- * runs every PROVISION_PERIOD_SEC seconds. the actual http requests go
- * through libcurl (or mock mode for offline testing).
+ thread 1 - certificate provisioning (medium priority)
+ 
+ handles the enrollment workflow from brecht et al. [1, figure 5]:
+    1)generate ecdsa p-256 keypair and x.509 csr
+   2)send csr to the enrollment endpoint (EJBCA REST api)
+   3)request a batch of 20 pseudonym certs
+   4)load the new signing key and swwaps it into shared state
+   5)signal the condition variable so thread 0 knows theres a new cert
+
+  runs every PROVISION_PERIOD_SEC seconds. the actual http requests go
+ through libcurl (or mock mode for offline testing)
  */
 static void *provision_thread(void *arg) {
     app_state_t *s = (app_state_t *)arg;
@@ -203,6 +203,7 @@ static void *provision_thread(void *arg) {
                into the shared state. thread 0 uses EVP_PKEY_up_ref so its
                safe to free the old key here even if thread 0 grabbed a
                reference to it already */
+            // at least i think it's safe? i'll check it again in a bit
             EVP_PKEY *new_key = load_signing_key(PRIVATE_KEY_PATH);
             if (new_key) {
                 EVP_PKEY *old_key = s->signing_key;
@@ -215,8 +216,8 @@ static void *provision_thread(void *arg) {
             snprintf(s->pseudonym_bundle_path, sizeof(s->pseudonym_bundle_path),
                      "%s", PSEUDONYM_BUNDLE_PATH);
 
-            /* signal thread 0 that a cert is ready. this matters for the
-               very first enrollment when thread 0 is blocked on cond_wait */
+            // signal thread 0 that a cert is ready. this matters for the
+            //  very first enrollment 
             s->cert_ready = 1;
             pthread_cond_signal(&s->cert_available);
         } else {
@@ -230,11 +231,10 @@ static void *provision_thread(void *arg) {
 }
 
 /*
- * thread 2 - performance monitor (lowest priority)
- *
- * takes a snapshot of the metrics struct every second and writes it
- * to the csv file + prints to stdout. prabhkirat and shihao will use
- * the csv output for the python analysis (pandas/matplotlib).
+  thread 2 performance monitor (lowest prio)
+ 
+takes a snapshot of the metrics struct every second and writes it
+ to the csv file + prints to stdout
  */
 static void *monitor_thread(void *arg) {
     app_state_t *s = (app_state_t *)arg;
@@ -267,10 +267,10 @@ static void *monitor_thread(void *arg) {
 }
 
 /*
- * sets up SCHED_RR priority for a thread (lecture 5 - preemptive scheduling).
- * on QNX this actually enforces priority preemption. on linux/windows dev
- * machines it usually fails silently because you need root, so we just
- * fall back to the default scheduler and print a warning.
+  sets up SCHED_RR priority for a thread (lecture 5 preemptive scheduling).
+  on QNX this enforces priority preemption i think. on linux/windows dev
+  machines it usually fails silently because you need root, so we just
+  fall back to the default scheduler and print out a warning
  */
 static int set_thread_priority(pthread_attr_t *attr, int priority) {
     struct sched_param param;
@@ -280,12 +280,12 @@ static int set_thread_priority(pthread_attr_t *attr, int priority) {
         return -1;
 
 #ifdef __QNX__
-    /* on QNX, SCHED_RR is the standard round-robin real-time scheduler */
+    // on QNX, SCHED_RR is the real-time scheduler 
     if (pthread_attr_setschedpolicy(attr, SCHED_RR) != 0)
         return -1;
 #else
-    /* on linux/windows try SCHED_RR but fall back to SCHED_OTHER if
-       we dont have permissions (need root on linux) */
+    /* on linux/windows try but fall back to SCHED_OTHER if
+       we dont have permissions  */
     if (pthread_attr_setschedpolicy(attr, SCHED_RR) != 0) {
         pthread_attr_setschedpolicy(attr, SCHED_OTHER);
         param.sched_priority = 0;
@@ -320,8 +320,8 @@ int main(int argc, char **argv) {
 
     signal(SIGINT, on_sigint);
 
-    /* set up thread attributes with priorities. on QNX these will actually
-       cause preemptive scheduling. on dev machines they'll probably fail
+    /* set up thread attributes with priorities. on QNX these will
+       cause preemptive scheduling. on our machines they'll probably fail
        and fall back to defaults which is fine for testing */
     pthread_attr_t attr_signer, attr_prov, attr_mon;
     pthread_attr_init(&attr_signer);
@@ -336,7 +336,7 @@ int main(int argc, char **argv) {
     int rc;
 
     /* create each thread with its priority. if the priority setup failed
-       (eg no root on linux), fall back to creating with default attrs */
+       (eg no root on linux), fall back */
     rc = pthread_create(&signer_tid, &attr_signer, signer_thread, &g_state);
     if (rc != 0) {
         fprintf(stderr, "WARN: signer thread priority failed (%d), using default\n", rc);

@@ -23,6 +23,7 @@ EVP_PKEY *load_signing_key(const char *key_path);
 /* signs a bsm payload using ecdsa p-256 with sha-256 digest
    we use the openssl EVP_DigestSign api for this (same pattern as the csr signing).
    returns 0 on success, -1 on any failure */
+// CHECK DOCUMENTATION.
 int sign_bsm_payload(EVP_PKEY *key, const unsigned char *payload,
                      size_t payload_len, unsigned char *sig_out,
                      size_t *sig_len_out);

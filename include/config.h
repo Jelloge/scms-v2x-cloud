@@ -12,6 +12,25 @@
 #define DEFAULT_ENROLLMENT_URL "mock://enroll"
 #define DEFAULT_PSEUDONYM_URL "mock://pseudonym"
 
+/* ejbca rest api config - these need to match whatever you set up
+   in the ejbca admin ui (certificate profile, end entity profile, etc).
+   change these if your ejbca setup uses different names */
+#define EJBCA_CERT_PROFILE   "V2X-Enrollment"
+#define EJBCA_EE_PROFILE     "V2X-EndEntity"
+#define EJBCA_CA_NAME        "V2X-RootCA"
+#define EJBCA_USERNAME       "qnx-vehicle-client"
+#define EJBCA_PASSWORD       "steed"
+
+/* client certificate for ejbca rest api authentication (mutual TLS).
+   ejbca requires a superadmin client cert to access the rest api.
+   extract these from the docker container with:
+     docker cp ejbca:/opt/keyfactor/p12/superadmin.p12 .
+     openssl pkcs12 -in superadmin.p12 -clcerts -nokeys -out superadmin_cert.pem
+     openssl pkcs12 -in superadmin.p12 -nocerts -nodes -out superadmin_key.pem
+   then place them in cert_store/ */
+#define EJBCA_CLIENT_CERT  CERT_STORE_DIR "/superadmin_cert.pem"
+#define EJBCA_CLIENT_KEY   CERT_STORE_DIR "/superadmin_key.pem"
+
 #define BSM_PERIOD_MS 100
 #define PROVISION_PERIOD_SEC 5
 
