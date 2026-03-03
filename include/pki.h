@@ -28,4 +28,8 @@ int sign_bsm_payload(EVP_PKEY *key, const unsigned char *payload,
                      size_t payload_len, unsigned char *sig_out,
                      size_t *sig_len_out);
 
+int load_cert_identifiers(const char *cert_path,
+                          char *serial_out, size_t serial_out_len,
+                          char *issuer_dn_out, size_t issuer_dn_out_len);
+
 #endif

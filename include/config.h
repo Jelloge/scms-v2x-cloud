@@ -8,9 +8,14 @@
 #define ENROLLMENT_CERT_PATH CERT_STORE_DIR "/enrollment_cert.pem"
 #define PSEUDONYM_BUNDLE_PATH CERT_STORE_DIR "/pseudonym_bundle.pem"
 #define METRICS_CSV_PATH CERT_STORE_DIR "/metrics.csv"
+#define CRL_PATH CERT_STORE_DIR "/ca.crl.pem"
+#define TRUSTED_CA_CERT_PATH CERT_STORE_DIR "/SCMSRootCA.pem"
+#define CRL_SIGNER_CERT_PATH TRUSTED_CA_CERT_PATH
 
 #define DEFAULT_ENROLLMENT_URL "mock://enroll"
 #define DEFAULT_PSEUDONYM_URL "mock://pseudonym"
+#define DEFAULT_CRL_URL "mock://crl"
+#define DEFAULT_REVOKE_URL "mock://revoke"
 
 /* ejbca rest api config - these need to match whatever you set up
    in the ejbca admin ui (certificate profile, end entity profile, etc).
@@ -42,5 +47,22 @@
 /* size of the simulated BSM payload in bytes. real V2X BSMs are
    typically around 200-400 bytes containing position, speed, heading etc */
 #define BSM_PAYLOAD_SIZE 300
+
+#define ENROLLMENT_URL_ENDPOINT "/ejbca/ejbca-rest-api/v1/certificate/pkcs10enroll"
+#define PSEUDONYM_URL_ENDPOINT "/ejbca/ejbca-rest-api/v1/certificate/pkcs10enroll"
+#define CRL_URL_ENDPOINT "/ejbca/publicweb/webdist/certdist?cmd=crl"
+#define REVOKE_URL_ENDPOINT "/ejbca/ejbcaws/ejbcaws"
+
+// @TODO: Revoke request might break with it on needs to be tested
+// enable to skip TLS verification in the http client for testing with self-signed certs
+// Needs Root CA certs to be in place for the client to work properly
+// this is SSL_VERIFYPEER + SSL_VERIFYHOST = who EJBCA is to YOU (server authentication).
+#define EJBCA_TLS 0
+
+// how often the client refreshes the CRL to check for revocation (in seconds)
+#define CRL_REFRESH_SEC 30
+
+// probability of simulating a revocation for the active cert on each provisioning cycle (for testing CRL refresh and signer behavior on revocation)
+#define SIM_REVOCATION_PROBABILITY_PERCENT 25
 
 #endif

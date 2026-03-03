@@ -14,8 +14,10 @@
  */
 
 #include "config.h"
+#include "certRevocation.h"
 #include "metrics.h"
 #include "pki.h"
+#include "simCertRevocation.h"
 #include "storage.h"
 
 #include <openssl/evp.h>
@@ -42,6 +44,10 @@ typedef struct {
     char            pseudonym_bundle_path[256];
     const char     *enroll_url;
     const char     *pseudo_url;
+    const char     *crl_url;             // CRL download/check endpoint (read path)
+    const char     *revoke_url;          // revoke submission endpoint (write path, SOAP)
+    int             cert_revoked;        // latched by signer CRL checks; blocks BSM signing when set
+    uint64_t        last_crl_check_ns;   // periodic CRL refresh timestamp used by signer thread
 } app_state_t;
 
 static app_state_t g_state;
@@ -102,6 +108,40 @@ static void *signer_thread(void *arg) {
 
     for (;;) {
         uint64_t cycle_start = monotonic_time_ns();
+        int should_run_crl_check = 0;  // flag to run CRL check outside of mutex
+        char active_cert_path[sizeof(s->enrollment_cert_path)] = {0}; // local copy of active cert path for CRL check, to avoid holding mutex during file I/O
+
+        // Periodic CRL refresh/check. Signer thread owns this to keep revocation
+        pthread_mutex_lock(&s->lock);
+        if ((cycle_start - s->last_crl_check_ns) >= (uint64_t) CRL_REFRESH_SEC * 1000000000ull) {
+            should_run_crl_check = 1;
+            s->last_crl_check_ns = cycle_start;
+            snprintf(active_cert_path, sizeof(active_cert_path), "%s", s->enrollment_cert_path);
+        }
+        pthread_mutex_unlock(&s->lock);
+
+        // if it's time for a CRL check, do it here outside the mutex to avoid blocking thread 1's provisioning work. 
+        // the CRL check will update the cert_revoked flag in shared state which will cause signing to skip if our cert is revoked.
+        if (should_run_crl_check) {
+            int revoked = 0;
+            
+            if (active_cert_path[0] == '\0') {
+                fprintf(stderr, "[crl] refresh/check skipped: active certificate path is empty\n");
+            } else {
+
+                // Download latest CRL and check whether our active certificate is revoked.
+                // returns: 0 -> success, -1 -> failure
+                int crl_rc = crl_refresh_and_check(s->crl_url, CRL_PATH, active_cert_path, &revoked);
+
+                pthread_mutex_lock(&s->lock);
+                if (crl_rc == 0) {
+                    s->cert_revoked = revoked;
+                } else {
+                    fprintf(stderr, "[crl] refresh/check failed; keeping previous revocation state\n");
+                }
+                pthread_mutex_unlock(&s->lock);
+            }
+        }
 
         /* time how long we block waiting for the mutex. if thread 1 is
            in the middle of swapping the signing key, we'll see contention here */
@@ -109,8 +149,10 @@ static void *signer_thread(void *arg) {
         pthread_mutex_lock(&s->lock);
         timer_stop(&mutex_timer);
 
-        int stop = s->stop;
-        EVP_PKEY *key = s->signing_key;
+        int stop        = s->stop;
+        EVP_PKEY *key   = s->signing_key;
+        int revoked     = s->cert_revoked;
+
         /* increment the refcount so thread 1 can safely free the old key
            while we're still using it for signing. EVP_PKEY_up_ref is
            openssl's built-in reference counting mechanism */
@@ -127,6 +169,19 @@ static void *signer_thread(void *arg) {
         if (stop) {
             if (key) EVP_PKEY_free(key);
             break;
+        }
+        
+        // if our cert is revoked, skip signing but still sleep for the remainder of the 100ms period to simulate the missed BSMs and observe the impact on metrics.
+        if (revoked) {
+            if (key) EVP_PKEY_free(key);
+            fprintf(stderr, "[signer] active certificate is revoked; signing skipped\n");
+
+            uint64_t elapsed_ns = monotonic_time_ns() - cycle_start;
+            if (elapsed_ns < (uint64_t)BSM_PERIOD_MS * 1000000ull) {
+                uint64_t remain_ns = (uint64_t)BSM_PERIOD_MS * 1000000ull - elapsed_ns;
+                nanosleep_ms((int)(remain_ns / 1000000ull));
+            }
+            continue;
         }
 
         /* do the actual ecdsa signature outside the critical section
@@ -173,19 +228,33 @@ static void *signer_thread(void *arg) {
  
  handles the enrollment workflow from brecht et al. [1, figure 5]:
     1)generate ecdsa p-256 keypair and x.509 csr
-   2)send csr to the enrollment endpoint (EJBCA REST api)
-   3)request a batch of 20 pseudonym certs
-   4)load the new signing key and swwaps it into shared state
-   5)signal the condition variable so thread 0 knows theres a new cert
+    2)send csr to the enrollment endpoint (EJBCA REST api)
+    3)request a batch of 20 pseudonym certs
+    4)load the new signing key and swwaps it into shared state
+    5)signal the condition variable so thread 0 knows theres a new cert
 
-  runs every PROVISION_PERIOD_SEC seconds. the actual http requests go
- through libcurl (or mock mode for offline testing)
+    runs every PROVISION_PERIOD_SEC seconds. the actual http requests go through libcurl (or mock mode for offline testing)
  */
 static void *provision_thread(void *arg) {
     app_state_t *s = (app_state_t *)arg;
     for (;;) {
+        char cert_path_local[256] = {0};
+        char serial_local[CERT_SERIAL_MAX_LEN] = {0};
+        char issuer_local[CERT_ISSUER_DN_MAX_LEN] = {0};
+        int should_try_sim_revoke = 0;
+
         pthread_mutex_lock(&s->lock);
         int stop = s->stop;
+
+        // if we had a valid cert before starting this provisioning cycle,
+        // try simulating a revoke for it so we can observe revocation impact.
+        if (s->cert_ready && s->enrollment_cert_path[0] != '\0') {
+            snprintf(cert_path_local, sizeof(cert_path_local), "%s", s->enrollment_cert_path);
+            snprintf(serial_local, sizeof(serial_local), "%s", s->metrics.active_cert_serial);
+            snprintf(issuer_local, sizeof(issuer_local), "%s", s->metrics.active_cert_issuer_dn);
+            should_try_sim_revoke = 1;
+        }
+
         pthread_mutex_unlock(&s->lock);
         if (stop) break;
 
@@ -216,6 +285,24 @@ static void *provision_thread(void *arg) {
             snprintf(s->pseudonym_bundle_path, sizeof(s->pseudonym_bundle_path),
                      "%s", PSEUDONYM_BUNDLE_PATH);
 
+            // extract cert identifiers for metrics and revocation logic. 
+            // if this fails we still proceed with the new cert but mark the identifiers as unavailable in the metrics.
+            if (load_cert_identifiers(s->enrollment_cert_path,
+                s->metrics.active_cert_serial,
+                sizeof(s->metrics.active_cert_serial),
+                s->metrics.active_cert_issuer_dn,
+                sizeof(s->metrics.active_cert_issuer_dn)) != 0) 
+            {
+                snprintf(s->metrics.active_cert_serial,
+                    sizeof(s->metrics.active_cert_serial),
+                    "unavailable"
+                );
+                snprintf(s->metrics.active_cert_issuer_dn,
+                    sizeof(s->metrics.active_cert_issuer_dn),
+                    "unavailable"
+                );
+            }
+
             // signal thread 0 that a cert is ready. this matters for the
             //  very first enrollment 
             s->cert_ready = 1;
@@ -223,7 +310,15 @@ static void *provision_thread(void *arg) {
         } else {
             s->metrics.provision_fail++;
         }
+
+
         pthread_mutex_unlock(&s->lock);
+
+        // submit revoke request for the active cert
+        // and let signer-side CRL observe revocation on subsequent refreshes.
+        if (should_try_sim_revoke && cert_path_local[0] != '\0') {
+            (void) sim_maybe_revoke_active_cert(s->revoke_url, serial_local, issuer_local);
+        }
 
         sleep(PROVISION_PERIOD_SEC);
     }
@@ -247,7 +342,8 @@ static void *monitor_thread(void *arg) {
         metrics_csv_append(METRICS_CSV_PATH, &snapshot);
         printf("[METRICS] bsm=%llu miss=%llu ok=%llu fail=%llu "
                "key=%.2fms enroll=%.2fms pseudo=%.2fms "
-               "sign=%.2fms(max %.2f) mutex=%.3fms(max %.3f)\n",
+             "sign=%.2fms(max %.2f) mutex=%.3fms(max %.3f) "
+             "cert_serial=%s issuer_dn=%s\n",
                (unsigned long long)snapshot.bsm_cycles,
                (unsigned long long)snapshot.bsm_deadline_miss,
                (unsigned long long)snapshot.provision_ok,
@@ -258,9 +354,13 @@ static void *monitor_thread(void *arg) {
                snapshot.last_bsm_sign_ms,
                snapshot.max_bsm_sign_ms,
                snapshot.last_mutex_wait_ms,
-               snapshot.max_mutex_wait_ms);
+               snapshot.max_mutex_wait_ms,
+               snapshot.active_cert_serial,
+               snapshot.active_cert_issuer_dn);
 
-        if (stop) break;
+        if (stop){
+            break;
+        }
         sleep(1);
     }
     return NULL;
@@ -276,13 +376,16 @@ static int set_thread_priority(pthread_attr_t *attr, int priority) {
     struct sched_param param;
     param.sched_priority = priority;
 
-    if (pthread_attr_setinheritsched(attr, PTHREAD_EXPLICIT_SCHED) != 0)
+    if (pthread_attr_setinheritsched(attr, PTHREAD_EXPLICIT_SCHED) != 0){
         return -1;
+    }
 
 #ifdef __QNX__
     // on QNX, SCHED_RR is the real-time scheduler 
-    if (pthread_attr_setschedpolicy(attr, SCHED_RR) != 0)
+    if (pthread_attr_setschedpolicy(attr, SCHED_RR) != 0){
         return -1;
+    }
+
 #else
     /* on linux/windows try but fall back to SCHED_OTHER if
        we dont have permissions  */
@@ -292,15 +395,110 @@ static int set_thread_priority(pthread_attr_t *attr, int priority) {
     }
 #endif
 
-    if (pthread_attr_setschedparam(attr, &param) != 0)
+    if (pthread_attr_setschedparam(attr, &param) != 0){
         return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * build_url_from_host - constructs a full URL from host/IP
+ *
+ * takes a host IP address (e.g., "10.0.0.243" or "example.com") and
+ * assembles it with the given scheme (e.g., "http" or "https") and endpoint
+ * path to build a complete URL string.
+ *
+ * automatically strips any trailing slashes from the host and ensures the
+ * endpoint starts with a leading slash if missing. this makes it easier to
+ * switch between different servers in command-line arguments without worrying
+ * about URL formatting edge cases.
+ *
+ * params:
+ *   host_or_ip  - hostname or IP address (e.g., "10.0.0.243", "localhost")
+ *   scheme      - URL scheme without "://" (e.g., "http", "https")
+ *   endpoint    - API endpoint path (e.g., "/ejbca/enrollmentCode" or "rest/v1/crl")
+ *   url_out     - output buffer to write the constructed URL
+ *   url_out_len - size of output buffer in bytes
+ *
+ * returns:
+ *    0 on success (url_out contains the constructed URL)
+ *   -1 on failure (invalid input, buffer too small, or formatting error)
+ *
+ * example:
+ *   build_url_from_host("10.0.0.243", "https", "/ejbca/enrollmentCode", buf, sizeof(buf))
+ *   -> buf = "https://10.0.0.243/ejbca/enrollmentCode"
+ */
+static int build_url_from_host(const char *host_or_ip, const char *scheme, const char *endpoint, char *url_out, size_t url_out_len) {
+    if (!host_or_ip || !scheme || !endpoint || !url_out || url_out_len == 0){
+        return -1;
+    }
+
+    size_t host_len = strlen(host_or_ip);
+    while (host_len > 0 && host_or_ip[host_len - 1] == '/') {
+        host_len--;
+    }
+
+    if (host_len == 0){ 
+        return -1;
+    }
+
+    const char *endpoint_part = endpoint;
+    char endpoint_with_slash[512];
+    if (endpoint[0] != '/') {
+        snprintf(endpoint_with_slash, sizeof(endpoint_with_slash), "/%s", endpoint);
+        endpoint_part = endpoint_with_slash;
+    }
+
+    int n = snprintf(url_out, url_out_len, "%s://%.*s%s", scheme, (int)host_len, host_or_ip, endpoint_part);
+    if (n <= 0 || (size_t)n >= url_out_len){
+        return -1;
+    }
 
     return 0;
 }
 
 int main(int argc, char **argv) {
-    const char *enroll_url = argc > 1 ? argv[1] : DEFAULT_ENROLLMENT_URL;
-    const char *pseudo_url = argc > 2 ? argv[2] : DEFAULT_PSEUDONYM_URL;
+    char enroll_url_buf[512] = {0}; 
+    char pseudo_url_buf[512] = {0};
+    char crl_url_buf[768] = {0};
+    char revoke_url_buf[512] = {0};
+
+    // default to the hardcoded URLs in config.h
+    const char *enroll_url = DEFAULT_ENROLLMENT_URL;
+    const char *pseudo_url = DEFAULT_PSEUDONYM_URL;
+    const char *crl_url = DEFAULT_CRL_URL;
+    const char *revoke_url = DEFAULT_REVOKE_URL;
+
+    // if command-line arguments are provided, try to build URLs from the first argument as a host/IP. 
+    // allows quick switching between different servers without needing to provide all 4 URLs or worry about formatting.
+    if (argc > 1) {
+        const char *arg1 = argv[1];
+
+        // if the first argument contains "://", we assume the user is providing full URLs and we skip the host-based URL construction logic.  
+        // Allows flexibility to provide some or all URLs as full URLs in the command-line arguments if desired, while still supporting the convenient host-based mode.
+        if (strstr(arg1, "://") == NULL) {
+            if (build_url_from_host(arg1, "https", ENROLLMENT_URL_ENDPOINT, enroll_url_buf, sizeof(enroll_url_buf)) != 0 ||
+                build_url_from_host(arg1, "https", PSEUDONYM_URL_ENDPOINT, pseudo_url_buf, sizeof(pseudo_url_buf)) != 0 ||
+                // CRLs are cryptographically signed by the CA, so their integrity is protected even over an unencrypted connection.
+                // CRL signature is validated in crl_refresh_and_check, so tampering is detected
+                build_url_from_host(arg1, "http", CRL_URL_ENDPOINT, crl_url_buf, sizeof(crl_url_buf)) != 0 ||
+                build_url_from_host(arg1, "https", REVOKE_URL_ENDPOINT, revoke_url_buf, sizeof(revoke_url_buf)) != 0) {
+                fprintf(stderr, "failed to build URLs from host/IP argument: %s\n", arg1);
+                return 1;
+            }
+
+            enroll_url = enroll_url_buf;
+            pseudo_url = pseudo_url_buf;
+            crl_url = crl_url_buf;
+            revoke_url = revoke_url_buf;
+        } else {
+            enroll_url = arg1;
+            pseudo_url = argc > 2 ? argv[2] : DEFAULT_PSEUDONYM_URL;
+            crl_url = argc > 3 ? argv[3] : DEFAULT_CRL_URL;
+            revoke_url = argc > 4 ? argv[4] : DEFAULT_REVOKE_URL;
+        }
+    }
 
     if (ensure_cert_store() != 0) {
         fprintf(stderr, "failed to initialize certificate storage\n");
@@ -317,6 +515,14 @@ int main(int argc, char **argv) {
     g_state.signing_key = NULL;
     g_state.enroll_url  = enroll_url;
     g_state.pseudo_url  = pseudo_url;
+    g_state.crl_url     = crl_url;
+    g_state.revoke_url  = revoke_url;
+    g_state.cert_revoked = 0;
+    g_state.last_crl_check_ns = 0;
+    snprintf(g_state.metrics.active_cert_serial,
+             sizeof(g_state.metrics.active_cert_serial), "n/a");
+    snprintf(g_state.metrics.active_cert_issuer_dn,
+             sizeof(g_state.metrics.active_cert_issuer_dn), "n/a");
 
     signal(SIGINT, on_sigint);
 
@@ -359,7 +565,7 @@ int main(int argc, char **argv) {
     pthread_attr_destroy(&attr_prov);
     pthread_attr_destroy(&attr_mon);
 
-    printf("RTOS client started. enroll=%s pseudo=%s\n", enroll_url, pseudo_url);
+    printf("RTOS client started. enroll=%s pseudo=%s crl=%s revoke=%s\n", enroll_url, pseudo_url, crl_url, revoke_url);
     printf("Thread priorities: signer=%d provision=%d monitor=%d\n",
            PRIO_SIGNER, PRIO_PROVISION, PRIO_MONITOR);
     printf("Press Ctrl+C to stop. Metrics: %s\n", METRICS_CSV_PATH);

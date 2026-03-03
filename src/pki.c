@@ -6,6 +6,7 @@
 #include "storage.h"
 
 #include <openssl/bio.h>
+#include <openssl/bn.h>
 #include <openssl/core_names.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -381,20 +382,99 @@ int run_provisioning_cycle(const char *enroll_url, const char *pseudo_url,
                            pki_cycle_metrics_t *metrics_out) {
     timer_sample_t t = {0};
 
+    if (!enroll_url || !pseudo_url || !metrics_out) {
+        fprintf(stderr, "[provision] invalid input: enroll_url=%p pseudo_url=%p metrics_out=%p\n",
+                (void *)enroll_url, (void *)pseudo_url, (void *)metrics_out);
+        return -1;
+    }
+
     timer_start(&t);
-    if (generate_enrollment_key_and_csr("qnx-vehicle-client") != 0) return -1;
+    if (generate_enrollment_key_and_csr("qnx-vehicle-client") != 0) {
+        fprintf(stderr, "[provision] key/CSR generation failed\n");
+        return -1;
+    }
     timer_stop(&t);
     metrics_out->keygen_ms = timer_elapsed_ms(&t);
 
     timer_start(&t);
-    if (submit_enrollment_request(enroll_url) != 0) return -1;
+    if (submit_enrollment_request(enroll_url) != 0) {
+        fprintf(stderr, "[provision] enrollment request failed url=%s\n", enroll_url);
+        return -1;
+    }
     timer_stop(&t);
     metrics_out->enroll_ms = timer_elapsed_ms(&t);
 
     timer_start(&t);
-    if (request_pseudonym_batch(pseudo_url, CERT_BATCH_SIZE) != 0) return -1;
+    if (request_pseudonym_batch(pseudo_url, CERT_BATCH_SIZE) != 0) {
+        fprintf(stderr, "[provision] pseudonym request failed url=%s\n", pseudo_url);
+        return -1;
+    }
     timer_stop(&t);
     metrics_out->pseudonym_ms = timer_elapsed_ms(&t);
 
+    return 0;
+}
+
+/*
+ * Loads certificate identifiers needed by runtime metrics and revoke/CRL flows.
+ *
+ * cert_path          -> path to PEM certificate file
+ * serial_out         -> destination buffer for certificate serial (hex string)
+ * serial_out_len     -> size of serial_out buffer
+ * issuer_dn_out      -> destination buffer for issuer distinguished name
+ * issuer_dn_out_len  -> size of issuer_dn_out buffer
+ *
+ * Returns:
+ *   0  -> success
+ *  -1  -> invalid input, file/cert parse failure, or extraction failure
+ */
+int load_cert_identifiers(const char *cert_path, char *serial_out, size_t serial_out_len, char *issuer_dn_out, size_t issuer_dn_out_len) {
+    if (!cert_path || !serial_out || !issuer_dn_out || serial_out_len == 0 || issuer_dn_out_len == 0) {
+        return -1;
+    }
+
+    FILE *f = fopen(cert_path, "rb");
+    if (!f){
+        return -1;
+    }
+
+    X509 *cert = PEM_read_X509(f, NULL, NULL, NULL);
+    fclose(f);
+    if (!cert){
+        return -1;
+    }
+
+    // extract serial number and convert to hex string
+    const ASN1_INTEGER *serial = X509_get0_serialNumber(cert);
+    BIGNUM *serial_bn = ASN1_INTEGER_to_BN(serial, NULL);
+    if (!serial_bn) {
+        X509_free(cert);
+        return -1;
+    }
+
+    char *serial_hex = BN_bn2hex(serial_bn);
+    BN_free(serial_bn);
+    if (!serial_hex) {
+        X509_free(cert);
+        return -1;
+    }
+
+    snprintf(serial_out, serial_out_len, "%s", serial_hex);
+    OPENSSL_free(serial_hex);
+    
+    X509_NAME *issuer = X509_get_issuer_name(cert);
+    if (!issuer) {
+        X509_free(cert);
+        return -1;
+    }
+
+    char issuer_tmp[1024] = {0};
+    if (!X509_NAME_oneline(issuer, issuer_tmp, sizeof(issuer_tmp))) {
+        X509_free(cert);
+        return -1;
+    }
+
+    snprintf(issuer_dn_out, issuer_dn_out_len, "%s", issuer_tmp);
+    X509_free(cert);
     return 0;
 }

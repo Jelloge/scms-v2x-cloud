@@ -3,6 +3,9 @@
 
 #include <stdint.h>
 
+#define CERT_SERIAL_MAX_LEN 128
+#define CERT_ISSUER_DN_MAX_LEN 512
+
 typedef struct {
     uint64_t start_ns;
     uint64_t end_ns;
@@ -23,6 +26,8 @@ typedef struct {
     //  during cert swap - this shows mutex contention (lecture 5)
     double last_mutex_wait_ms;
     double max_mutex_wait_ms;
+    char active_cert_serial[CERT_SERIAL_MAX_LEN];
+    char active_cert_issuer_dn[CERT_ISSUER_DN_MAX_LEN];
 } runtime_metrics_t;
 
 uint64_t monotonic_time_ns(void);
