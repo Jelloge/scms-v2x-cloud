@@ -9,7 +9,7 @@
 #define PSEUDONYM_BUNDLE_PATH CERT_STORE_DIR "/pseudonym_bundle.pem"
 #define METRICS_CSV_PATH CERT_STORE_DIR "/metrics.csv"
 #define CRL_PATH CERT_STORE_DIR "/ca.crl.pem"
-#define TRUSTED_CA_CERT_PATH CERT_STORE_DIR "/SCMSRootCA.pem"
+#define TRUSTED_CA_CERT_PATH CERT_STORE_DIR "/RootCA.pem"
 #define CRL_SIGNER_CERT_PATH TRUSTED_CA_CERT_PATH
 
 #define DEFAULT_ENROLLMENT_URL "mock://enroll"
