@@ -48,6 +48,7 @@ typedef struct {
     const char     *revoke_url;          // revoke submission endpoint (write path, SOAP)
     int             cert_revoked;        // latched by signer CRL checks; blocks BSM signing when set
     uint64_t        last_crl_check_ns;   // periodic CRL refresh timestamp used by signer thread
+    int             provision_period_sec; // seconds between provision cycles (0 = baseline mode)
 } app_state_t;
 
 static app_state_t g_state;
@@ -243,6 +244,37 @@ static void *signer_thread(void *arg) {
  */
 static void *provision_thread(void *arg) {
     app_state_t *s = (app_state_t *)arg;
+
+    /* baseline mode: generate a local key for signing, signal cert_ready,
+       then exit. thread 0 signs BSMs without any cloud provisioning so we
+       can measure idle BSM latency as a comparison baseline. */
+    if (s->provision_period_sec == 0) {
+        printf("[provision] baseline mode: generating local key only (no cloud provisioning)\n");
+        if (generate_enrollment_key_and_csr("baseline-local") == 0) {
+            EVP_PKEY *key = load_signing_key(PRIVATE_KEY_PATH);
+            if (key) {
+                pthread_mutex_lock(&s->lock);
+                s->signing_key = key;
+                s->cert_ready = 1;
+                snprintf(s->metrics.active_cert_serial,
+                         sizeof(s->metrics.active_cert_serial), "baseline");
+                snprintf(s->metrics.active_cert_issuer_dn,
+                         sizeof(s->metrics.active_cert_issuer_dn), "local");
+                pthread_cond_signal(&s->cert_available);
+                pthread_mutex_unlock(&s->lock);
+            }
+        }
+        /* keep thread alive so it can respond to stop signal */
+        while (1) {
+            pthread_mutex_lock(&s->lock);
+            int stop = s->stop;
+            pthread_mutex_unlock(&s->lock);
+            if (stop) break;
+            sleep(1);
+        }
+        return NULL;
+    }
+
     for (;;) {
         char cert_path_local[256] = {0};
         char serial_local[CERT_SERIAL_MAX_LEN] = {0};
@@ -274,11 +306,6 @@ static void *provision_thread(void *arg) {
             s->metrics.last_enroll_ms    = cycle.enroll_ms;
             s->metrics.last_pseudonym_ms = cycle.pseudonym_ms;
 
-            /* load the newly generated private key from disk and swap it
-               into the shared state. thread 0 uses EVP_PKEY_up_ref so its
-               safe to free the old key here even if thread 0 grabbed a
-               reference to it already */
-            // at least i think it's safe? i'll check it again in a bit
             EVP_PKEY *new_key = load_signing_key(PRIVATE_KEY_PATH);
             if (new_key) {
                 EVP_PKEY *old_key = s->signing_key;
@@ -291,13 +318,11 @@ static void *provision_thread(void *arg) {
             snprintf(s->pseudonym_bundle_path, sizeof(s->pseudonym_bundle_path),
                      "%s", PSEUDONYM_BUNDLE_PATH);
 
-            // extract cert identifiers for metrics and revocation logic. 
-            // if this fails we still proceed with the new cert but mark the identifiers as unavailable in the metrics.
             if (load_cert_identifiers(s->enrollment_cert_path,
                 s->metrics.active_cert_serial,
                 sizeof(s->metrics.active_cert_serial),
                 s->metrics.active_cert_issuer_dn,
-                sizeof(s->metrics.active_cert_issuer_dn)) != 0) 
+                sizeof(s->metrics.active_cert_issuer_dn)) != 0)
             {
                 snprintf(s->metrics.active_cert_serial,
                     sizeof(s->metrics.active_cert_serial),
@@ -309,26 +334,22 @@ static void *provision_thread(void *arg) {
                 );
             }
 
-            // signal thread 0 that a cert is ready. this matters for the
-            //  very first enrollment 
             s->cert_ready = 1;
             pthread_cond_signal(&s->cert_available);
         } else {
             s->metrics.provision_fail++;
         }
 
-
         pthread_mutex_unlock(&s->lock);
 
         // submit revoke request for the active cert
-        // and let signer-side CRL observe revocation on subsequent refreshes.
         if (should_try_sim_revoke && cert_path_local[0] != '\0') {
             double revoke_time_ms = 0;
             (void) sim_maybe_revoke_active_cert(s->revoke_url, serial_local, issuer_local, &revoke_time_ms);
             s->metrics.revoke_request_ms = revoke_time_ms;
         }
 
-        sleep(PROVISION_PERIOD_SEC);
+        sleep(s->provision_period_sec);
     }
     return NULL;
 }
@@ -478,18 +499,16 @@ int main(int argc, char **argv) {
     const char *crl_url = DEFAULT_CRL_URL;
     const char *revoke_url = DEFAULT_REVOKE_URL;
 
-    // if command-line arguments are provided, try to build URLs from the first argument as a host/IP. 
-    // allows quick switching between different servers without needing to provide all 4 URLs or worry about formatting.
+    /* provision period: default from config.h, overridable via argv[2].
+       special value 0 = baseline mode (no provisioning, BSM signing only) */
+    int provision_period_sec = PROVISION_PERIOD_SEC;
+
     if (argc > 1) {
         const char *arg1 = argv[1];
 
-        // if the first argument contains "://", we assume the user is providing full URLs and we skip the host-based URL construction logic.  
-        // Allows flexibility to provide some or all URLs as full URLs in the command-line arguments if desired, while still supporting the convenient host-based mode.
         if (strstr(arg1, "://") == NULL) {
             if (build_url_from_host(arg1, "https", ENROLLMENT_URL_ENDPOINT, enroll_url_buf, sizeof(enroll_url_buf)) != 0 ||
                 build_url_from_host(arg1, "https", PSEUDONYM_URL_ENDPOINT, pseudo_url_buf, sizeof(pseudo_url_buf)) != 0 ||
-                // CRLs are cryptographically signed by the CA, so their integrity is protected even over an unencrypted connection.
-                // CRL signature is validated in crl_refresh_and_check, so tampering is detected
                 build_url_from_host(arg1, "http", CRL_URL_ENDPOINT, crl_url_buf, sizeof(crl_url_buf)) != 0 ||
                 build_url_from_host(arg1, "https", REVOKE_URL_ENDPOINT, revoke_url_buf, sizeof(revoke_url_buf)) != 0) {
                 fprintf(stderr, "failed to build URLs from host/IP argument: %s\n", arg1);
@@ -500,6 +519,12 @@ int main(int argc, char **argv) {
             pseudo_url = pseudo_url_buf;
             crl_url = crl_url_buf;
             revoke_url = revoke_url_buf;
+
+            /* argv[2]: optional provision period in seconds (0 = baseline) */
+            if (argc > 2) {
+                provision_period_sec = atoi(argv[2]);
+                if (provision_period_sec < 0) provision_period_sec = PROVISION_PERIOD_SEC;
+            }
         } else {
             enroll_url = arg1;
             pseudo_url = argc > 2 ? argv[2] : DEFAULT_PSEUDONYM_URL;
@@ -527,6 +552,7 @@ int main(int argc, char **argv) {
     g_state.revoke_url  = revoke_url;
     g_state.cert_revoked = 0;
     g_state.last_crl_check_ns = 0;
+    g_state.provision_period_sec = provision_period_sec;
     snprintf(g_state.metrics.active_cert_serial,
              sizeof(g_state.metrics.active_cert_serial), "n/a");
     snprintf(g_state.metrics.active_cert_issuer_dn,
@@ -576,6 +602,10 @@ int main(int argc, char **argv) {
     printf("RTOS client started. enroll=%s pseudo=%s crl=%s revoke=%s\n", enroll_url, pseudo_url, crl_url, revoke_url);
     printf("Thread priorities: signer=%d provision=%d monitor=%d\n",
            PRIO_SIGNER, PRIO_PROVISION, PRIO_MONITOR);
+    if (provision_period_sec == 0)
+        printf("Mode: BASELINE (BSM signing only, no cloud provisioning)\n");
+    else
+        printf("Provision interval: %ds | Batch size: %d\n", provision_period_sec, CERT_BATCH_SIZE);
     printf("Press Ctrl+C to stop. Metrics: %s\n", METRICS_CSV_PATH);
 
     pthread_join(signer_tid, NULL);

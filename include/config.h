@@ -9,7 +9,7 @@
 #define PSEUDONYM_BUNDLE_PATH CERT_STORE_DIR "/pseudonym_bundle.pem"
 #define METRICS_CSV_PATH CERT_STORE_DIR "/metrics.csv"
 #define CRL_PATH CERT_STORE_DIR "/ca.crl.pem"
-#define TRUSTED_CA_CERT_PATH CERT_STORE_DIR "/RootCA.pem"
+#define TRUSTED_CA_CERT_PATH CERT_STORE_DIR "/SCMSRootCA.pem"
 #define CRL_SIGNER_CERT_PATH TRUSTED_CA_CERT_PATH
 
 #define DEFAULT_ENROLLMENT_URL "mock://enroll"
@@ -20,8 +20,8 @@
 /* ejbca rest api config - these need to match whatever you set up
    in the ejbca admin ui (certificate profile, end entity profile, etc).
    change these if your ejbca setup uses different names */
-#define EJBCA_CERT_PROFILE   "V2X-Enrollment"
-#define EJBCA_EE_PROFILE     "V2X-EndEntity"
+#define EJBCA_CERT_PROFILE   "ENDUSER"
+#define EJBCA_EE_PROFILE     "EMPTY"
 #define EJBCA_CA_NAME        "V2X-RootCA"
 #define EJBCA_USERNAME       "qnx-vehicle-client"
 #define EJBCA_PASSWORD       "steed"

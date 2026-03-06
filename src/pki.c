@@ -253,10 +253,7 @@ int submit_enrollment_request(const char *url) {
    for the project this is fine,  the important part is measuring the
    round-trip latency to the cloud CA, which is the same either way (hopefully) */
 int request_pseudonym_batch(const char *url, int batch_size) {
-    (void)batch_size; /* not used for real ejbca */
-
     if (strncmp(url, "mock://", 7) == 0) {
-        /* keep the old simple behavior */
         char payload[128];
         snprintf(payload, sizeof(payload), "{\"batchSize\":%d}", batch_size);
         http_response_t resp = {0};
@@ -270,6 +267,10 @@ int request_pseudonym_batch(const char *url, int batch_size) {
         return rc;
     }
 
+    /* real EJBCA: loop batch_size times to simulate pseudonym batch (Chen jMax=20).
+       EJBCA CE doesn't support native batch enrollment, so we issue sequential
+       requests. each request produces one pseudonym cert. we save only the last
+       one to disk but the total wall time covers all batch_size round-trips. */
     char *csr = read_text_file(CSR_PATH);
     if (!csr) return -1;
 
@@ -301,29 +302,31 @@ int request_pseudonym_batch(const char *url, int batch_size) {
         EJBCA_USERNAME,
         EJBCA_PASSWORD);
 
-    http_response_t resp = {0};
-    int rc = http_post_json(url, payload, &resp);
+    int ok_count = 0;
+    for (int i = 0; i < batch_size; i++) {
+        http_response_t resp = {0};
+        int rc = http_post_json(url, payload, &resp);
 
-    if (rc == 0 && resp.status_code >= 200 && resp.status_code < 300) {
-        char *cert_b64 = json_get_string(resp.body, "certificate");
-        if (cert_b64) {
-            rc = base64_decode_to_pem(cert_b64, PSEUDONYM_BUNDLE_PATH);
-            free(cert_b64);
+        if (rc == 0 && resp.status_code >= 200 && resp.status_code < 300) {
+            char *cert_b64 = json_get_string(resp.body, "certificate");
+            if (cert_b64) {
+                /* save the last cert as the pseudonym bundle file */
+                if (base64_decode_to_pem(cert_b64, PSEUDONYM_BUNDLE_PATH) == 0)
+                    ok_count++;
+                free(cert_b64);
+            }
         } else {
-            fprintf(stderr, "[pseudonym] could not parse cert from response\n");
-            if (resp.body) fprintf(stderr, "[pseudonym] response: %s\n", resp.body);
-            rc = -1;
+            if (resp.body) fprintf(stderr, "[pseudonym] cert %d/%d failed %ld: %s\n",
+                                    i + 1, batch_size, resp.status_code, resp.body);
         }
-    } else {
-        if (resp.body) fprintf(stderr, "[pseudonym] server error %ld: %s\n",
-                                resp.status_code, resp.body);
-        rc = -1;
+        http_response_free(&resp);
     }
 
     free(escaped);
     free(payload);
-    http_response_free(&resp);
-    return rc;
+
+    fprintf(stderr, "[pseudonym] batch complete: %d/%d certs issued\n", ok_count, batch_size);
+    return ok_count > 0 ? 0 : -1;
 }
 
 /* read the private key back from disk after enrollment so we can
