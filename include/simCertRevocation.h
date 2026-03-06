@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-int sim_maybe_revoke_active_cert(const char *revoke_url, const char *cert_serial, const char *issuer_dn);
+int sim_maybe_revoke_active_cert(const char *revoke_url, const char *cert_serial, const char *issuer_dn, double *revoke_time_ms_out);
 
 
 #define SOAP_DEBUG 0

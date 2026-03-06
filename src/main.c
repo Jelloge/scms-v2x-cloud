@@ -104,7 +104,7 @@ static void *signer_thread(void *arg) {
     memset(bsm_payload, 0xAA, sizeof(bsm_payload));
 
     unsigned char signature[256];
-    timer_sample_t mutex_timer, sign_timer;
+    timer_sample_t mutex_timer, sign_timer, crl_timer;
 
     for (;;) {
         uint64_t cycle_start = monotonic_time_ns();
@@ -124,18 +124,24 @@ static void *signer_thread(void *arg) {
         // the CRL check will update the cert_revoked flag in shared state which will cause signing to skip if our cert is revoked.
         if (should_run_crl_check) {
             int revoked = 0;
-            
+            timer_start(&crl_timer);
             if (active_cert_path[0] == '\0') {
                 fprintf(stderr, "[crl] refresh/check skipped: active certificate path is empty\n");
             } else {
 
                 // Download latest CRL and check whether our active certificate is revoked.
                 // returns: 0 -> success, -1 -> failure
+                
                 int crl_rc = crl_refresh_and_check(s->crl_url, CRL_PATH, active_cert_path, &revoked);
-
+                timer_stop(&crl_timer);
+                double crl_check_ms = timer_elapsed_ms(&crl_timer);
+                
                 pthread_mutex_lock(&s->lock);
                 if (crl_rc == 0) {
                     s->cert_revoked = revoked;
+                    s->metrics.last_crl_check_ms = crl_check_ms;
+                    if (crl_check_ms > s->metrics.max_crl_check_ms)
+                        s->metrics.max_crl_check_ms = crl_check_ms;
                 } else {
                     fprintf(stderr, "[crl] refresh/check failed; keeping previous revocation state\n");
                 }
@@ -317,7 +323,9 @@ static void *provision_thread(void *arg) {
         // submit revoke request for the active cert
         // and let signer-side CRL observe revocation on subsequent refreshes.
         if (should_try_sim_revoke && cert_path_local[0] != '\0') {
-            (void) sim_maybe_revoke_active_cert(s->revoke_url, serial_local, issuer_local);
+            double revoke_time_ms = 0;
+            (void) sim_maybe_revoke_active_cert(s->revoke_url, serial_local, issuer_local, &revoke_time_ms);
+            s->metrics.revoke_request_ms = revoke_time_ms;
         }
 
         sleep(PROVISION_PERIOD_SEC);

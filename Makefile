@@ -1,6 +1,21 @@
-CC ?= gcc
-CFLAGS ?= -Wall -Wextra -O2 -Iinclude
-LDFLAGS ?= -lcurl -lssl -lcrypto -lpthread
+# --- Toolchain ---
+CC = qcc
+VARIANT ?= -V12.2.0,gcc_ntox86_64
+
+# --- Paths ---
+INCLUDES := -Iinclude
+
+# If you need extra include dirs, add them here, e.g.:
+# INCLUDES += -I$(QNX_TARGET)/x86_64/usr/include
+
+# If your build can't find libcurl/libssl/libcrypto, add the QNX lib dir:
+# LIBDIRS := -L$(QNX_TARGET)/x86_64/usr/lib
+LIBDIRS :=
+
+# --- Flags ---
+CFLAGS ?= -Wall -Wextra -O2 $(INCLUDES)
+LDFLAGS ?= $(LIBDIRS) -lcurl -lssl -lcrypto
+# NOTE: QNX: no -lpthread
 
 SRC := $(wildcard src/*.c)
 BIN := rtos_client
@@ -8,7 +23,7 @@ BIN := rtos_client
 all: $(BIN)
 
 $(BIN): $(SRC)
-	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
+	$(CC) $(VARIANT) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
 
 clean:
 	rm -f $(BIN)

@@ -28,6 +28,11 @@ typedef struct {
     double max_mutex_wait_ms;
     char active_cert_serial[CERT_SERIAL_MAX_LEN];
     char active_cert_issuer_dn[CERT_ISSUER_DN_MAX_LEN];
+
+        /* crl timers */
+    double last_crl_check_ms;
+    double max_crl_check_ms;
+    double revoke_request_ms;
 } runtime_metrics_t;
 
 uint64_t monotonic_time_ns(void);

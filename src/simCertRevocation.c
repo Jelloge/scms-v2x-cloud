@@ -89,7 +89,7 @@ static void normalize_issuer_dn(const char *input, char *output, size_t output_l
  *   0 on success path (including "no revoke this cycle"),
  *  -1 on invalid input or SOAP submission failure.
  */
-int sim_maybe_revoke_active_cert(const char *revoke_url, const char *cert_serial, const char *issuer_dn) {
+int sim_maybe_revoke_active_cert(const char *revoke_url, const char *cert_serial, const char *issuer_dn, double *revoke_time_ms_out) {
     if (!revoke_url || !cert_serial || !issuer_dn) {
         return -1;
     }
@@ -117,7 +117,8 @@ int sim_maybe_revoke_active_cert(const char *revoke_url, const char *cert_serial
         }
         return -1;
     }
-
+    timer_sample_t revoke_timer;
+    timer_start(&revoke_timer);
     /* issuer used in SOAP request: always certificate-derived (no config fallback) */
     const char *request_issuer_dn = normalized_issuer;
 
@@ -171,6 +172,9 @@ int sim_maybe_revoke_active_cert(const char *revoke_url, const char *cert_serial
     }
 
     http_response_free(&resp);
-
+    timer_stop(&revoke_timer);
+    if (revoke_time_ms_out) {
+        *revoke_time_ms_out = timer_elapsed_ms(&revoke_timer);
+    }
     return 0;
 }
