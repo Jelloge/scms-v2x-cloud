@@ -44,12 +44,16 @@ static char *json_escape_string(const char *in) {
     return out;
 }
 
-int generate_enrollment_key_and_csr(const char *common_name) {
+int generate_enrollment_key_and_csr(const char *common_name, const char *cert_store_dir) {
     EVP_PKEY_CTX *kctx = NULL;
     EVP_PKEY *pkey = NULL;
     X509_REQ *req = NULL;
     X509_NAME *name = NULL;
     FILE *kf = NULL, *cf = NULL;
+
+    char key_path[512], csr_path[512];
+    snprintf(key_path, sizeof(key_path), "%s/enrollment_key.pem", cert_store_dir);
+    snprintf(csr_path, sizeof(csr_path), "%s/enrollment.csr.pem", cert_store_dir);
 
     kctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
     if (!kctx) goto err;
@@ -69,8 +73,8 @@ int generate_enrollment_key_and_csr(const char *common_name) {
     X509_REQ_set_pubkey(req, pkey);
     if (!X509_REQ_sign(req, pkey, EVP_sha256())) goto err;
 
-    kf = fopen(PRIVATE_KEY_PATH, "w");
-    cf = fopen(CSR_PATH, "w");
+    kf = fopen(key_path, "w");
+    cf = fopen(csr_path, "w");
     if (!kf || !cf) goto err;
 
     if (!PEM_write_PrivateKey(kf, pkey, NULL, NULL, 0, NULL, NULL)) goto err;
@@ -169,8 +173,12 @@ static int base64_decode_to_pem(const char *b64, const char *out_path) {
     return ok ? 0 : -1;
 }
 
-int submit_enrollment_request(const char *url) {
-    char *csr = read_text_file(CSR_PATH);
+int submit_enrollment_request(const char *url, const char *cert_store_dir, const char *username) {
+    char csr_path[512], cert_path[512];
+    snprintf(csr_path, sizeof(csr_path), "%s/enrollment.csr.pem", cert_store_dir);
+    snprintf(cert_path, sizeof(cert_path), "%s/enrollment_cert.pem", cert_store_dir);
+
+    char *csr = read_text_file(csr_path);
     if (!csr) return -1;
 
     char *escaped = json_escape_string(csr);
@@ -207,7 +215,7 @@ int submit_enrollment_request(const char *url) {
             EJBCA_CERT_PROFILE,
             EJBCA_EE_PROFILE,
             EJBCA_CA_NAME,
-            EJBCA_USERNAME,
+            username,
             EJBCA_PASSWORD);
     }
 
@@ -217,13 +225,13 @@ int submit_enrollment_request(const char *url) {
     if (rc == 0 && resp.status_code >= 200 && resp.status_code < 300) {
         if (strncmp(url, "mock://", 7) == 0) {
             /* mock mode, just save the raw json like before */
-            rc = write_text_file(ENROLLMENT_CERT_PATH, resp.body ? resp.body : "");
+            rc = write_text_file(cert_path, resp.body ? resp.body : "");
         } else {
             /* real ejbca, response has the cert as base64 DER in a json field.
                we need to pull it out and decode it to PEM */
             char *cert_b64 = json_get_string(resp.body, "certificate");
             if (cert_b64) {
-                rc = base64_decode_to_pem(cert_b64, ENROLLMENT_CERT_PATH);
+                rc = base64_decode_to_pem(cert_b64, cert_path);
                 free(cert_b64);
             } else {
                 /* maybe ejbca returned the cert directly or an error */
@@ -252,14 +260,18 @@ int submit_enrollment_request(const char *url) {
    simulate it by enrolling once and saving the result as our "pseudonym".
    for the project this is fine,  the important part is measuring the
    round-trip latency to the cloud CA, which is the same either way (hopefully) */
-int request_pseudonym_batch(const char *url, int batch_size) {
+int request_pseudonym_batch(const char *url, int batch_size, const char *cert_store_dir, const char *username) {
+    char csr_path[512], pseudo_path[512];
+    snprintf(csr_path, sizeof(csr_path), "%s/enrollment.csr.pem", cert_store_dir);
+    snprintf(pseudo_path, sizeof(pseudo_path), "%s/pseudonym_bundle.pem", cert_store_dir);
+
     if (strncmp(url, "mock://", 7) == 0) {
         char payload[128];
         snprintf(payload, sizeof(payload), "{\"batchSize\":%d}", batch_size);
         http_response_t resp = {0};
         int rc = http_post_json(url, payload, &resp);
         if (rc == 0 && resp.status_code >= 200 && resp.status_code < 300) {
-            rc = write_text_file(PSEUDONYM_BUNDLE_PATH, resp.body ? resp.body : "");
+            rc = write_text_file(pseudo_path, resp.body ? resp.body : "");
         } else {
             rc = -1;
         }
@@ -271,7 +283,7 @@ int request_pseudonym_batch(const char *url, int batch_size) {
        EJBCA CE doesn't support native batch enrollment, so we issue sequential
        requests. each request produces one pseudonym cert. we save only the last
        one to disk but the total wall time covers all batch_size round-trips. */
-    char *csr = read_text_file(CSR_PATH);
+    char *csr = read_text_file(csr_path);
     if (!csr) return -1;
 
     char *escaped = json_escape_string(csr);
@@ -299,7 +311,7 @@ int request_pseudonym_batch(const char *url, int batch_size) {
         EJBCA_CERT_PROFILE,
         EJBCA_EE_PROFILE,
         EJBCA_CA_NAME,
-        EJBCA_USERNAME,
+        username,
         EJBCA_PASSWORD);
 
     int ok_count = 0;
@@ -311,7 +323,7 @@ int request_pseudonym_batch(const char *url, int batch_size) {
             char *cert_b64 = json_get_string(resp.body, "certificate");
             if (cert_b64) {
                 /* save the last cert as the pseudonym bundle file */
-                if (base64_decode_to_pem(cert_b64, PSEUDONYM_BUNDLE_PATH) == 0)
+                if (base64_decode_to_pem(cert_b64, pseudo_path) == 0)
                     ok_count++;
                 free(cert_b64);
             }
@@ -382,17 +394,17 @@ int sign_bsm_payload(EVP_PKEY *key, const unsigned char *payload,
 }
 
 int run_provisioning_cycle(const char *enroll_url, const char *pseudo_url,
+                           const char *cert_store_dir, const char *username,
                            pki_cycle_metrics_t *metrics_out) {
     timer_sample_t t = {0};
 
-    if (!enroll_url || !pseudo_url || !metrics_out) {
-        fprintf(stderr, "[provision] invalid input: enroll_url=%p pseudo_url=%p metrics_out=%p\n",
-                (void *)enroll_url, (void *)pseudo_url, (void *)metrics_out);
+    if (!enroll_url || !pseudo_url || !cert_store_dir || !username || !metrics_out) {
+        fprintf(stderr, "[provision] invalid input\n");
         return -1;
     }
 
     timer_start(&t);
-    if (generate_enrollment_key_and_csr("qnx-vehicle-client") != 0) {
+    if (generate_enrollment_key_and_csr(username, cert_store_dir) != 0) {
         fprintf(stderr, "[provision] key/CSR generation failed\n");
         return -1;
     }
@@ -400,7 +412,7 @@ int run_provisioning_cycle(const char *enroll_url, const char *pseudo_url,
     metrics_out->keygen_ms = timer_elapsed_ms(&t);
 
     timer_start(&t);
-    if (submit_enrollment_request(enroll_url) != 0) {
+    if (submit_enrollment_request(enroll_url, cert_store_dir, username) != 0) {
         fprintf(stderr, "[provision] enrollment request failed url=%s\n", enroll_url);
         return -1;
     }
@@ -408,7 +420,7 @@ int run_provisioning_cycle(const char *enroll_url, const char *pseudo_url,
     metrics_out->enroll_ms = timer_elapsed_ms(&t);
 
     timer_start(&t);
-    if (request_pseudonym_batch(pseudo_url, CERT_BATCH_SIZE) != 0) {
+    if (request_pseudonym_batch(pseudo_url, CERT_BATCH_SIZE, cert_store_dir, username) != 0) {
         fprintf(stderr, "[provision] pseudonym request failed url=%s\n", pseudo_url);
         return -1;
     }

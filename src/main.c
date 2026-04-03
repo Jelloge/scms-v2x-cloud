@@ -49,6 +49,12 @@ typedef struct {
     int             cert_revoked;        // latched by signer CRL checks; blocks BSM signing when set
     uint64_t        last_crl_check_ns;   // periodic CRL refresh timestamp used by signer thread
     int             provision_period_sec; // seconds between provision cycles (0 = baseline mode)
+    /* per-client paths, set from client_id in main() */
+    char            cert_store_dir[512]; /* e.g. ./cert_store_1, ./cert_store_2 */
+    char            csv_path[512];       /* cert_store_dir/metrics.csv */
+    char            key_path[512];       /* cert_store_dir/enrollment_key.pem */
+    char            crl_path[512];       /* cert_store_dir/ca.crl.pem */
+    char            ejbca_username[64];  /* e.g. qnx-vehicle-1, qnx-vehicle-2 */
 } app_state_t;
 
 static app_state_t g_state;
@@ -133,7 +139,7 @@ static void *signer_thread(void *arg) {
                 // Download latest CRL and check whether our active certificate is revoked.
                 // returns: 0 -> success, -1 -> failure
                 
-                int crl_rc = crl_refresh_and_check(s->crl_url, CRL_PATH, active_cert_path, &revoked);
+                int crl_rc = crl_refresh_and_check(s->crl_url, s->crl_path, active_cert_path, &revoked);
                 timer_stop(&crl_timer);
                 double crl_check_ms = timer_elapsed_ms(&crl_timer);
                 
@@ -250,8 +256,8 @@ static void *provision_thread(void *arg) {
        can measure idle BSM latency as a comparison baseline. */
     if (s->provision_period_sec == 0) {
         printf("[provision] baseline mode: generating local key only (no cloud provisioning)\n");
-        if (generate_enrollment_key_and_csr("baseline-local") == 0) {
-            EVP_PKEY *key = load_signing_key(PRIVATE_KEY_PATH);
+        if (generate_enrollment_key_and_csr("baseline-local", s->cert_store_dir) == 0) {
+            EVP_PKEY *key = load_signing_key(s->key_path);
             if (key) {
                 pthread_mutex_lock(&s->lock);
                 s->signing_key = key;
@@ -297,7 +303,8 @@ static void *provision_thread(void *arg) {
         if (stop) break;
 
         pki_cycle_metrics_t cycle = {0};
-        int rc = run_provisioning_cycle(s->enroll_url, s->pseudo_url, &cycle);
+        int rc = run_provisioning_cycle(s->enroll_url, s->pseudo_url,
+                                        s->cert_store_dir, s->ejbca_username, &cycle);
 
         pthread_mutex_lock(&s->lock);
         if (rc == 0) {
@@ -306,7 +313,7 @@ static void *provision_thread(void *arg) {
             s->metrics.last_enroll_ms    = cycle.enroll_ms;
             s->metrics.last_pseudonym_ms = cycle.pseudonym_ms;
 
-            EVP_PKEY *new_key = load_signing_key(PRIVATE_KEY_PATH);
+            EVP_PKEY *new_key = load_signing_key(s->key_path);
             if (new_key) {
                 EVP_PKEY *old_key = s->signing_key;
                 s->signing_key = new_key;
@@ -314,9 +321,9 @@ static void *provision_thread(void *arg) {
             }
 
             snprintf(s->enrollment_cert_path, sizeof(s->enrollment_cert_path),
-                     "%s", ENROLLMENT_CERT_PATH);
+                     "%s/enrollment_cert.pem", s->cert_store_dir);
             snprintf(s->pseudonym_bundle_path, sizeof(s->pseudonym_bundle_path),
-                     "%s", PSEUDONYM_BUNDLE_PATH);
+                     "%s/pseudonym_bundle.pem", s->cert_store_dir);
 
             if (load_cert_identifiers(s->enrollment_cert_path,
                 s->metrics.active_cert_serial,
@@ -368,7 +375,7 @@ static void *monitor_thread(void *arg) {
         runtime_metrics_t snapshot = s->metrics;
         pthread_mutex_unlock(&s->lock);
 
-        metrics_csv_append(METRICS_CSV_PATH, &snapshot);
+        metrics_csv_append(s->csv_path, &snapshot);
         printf("[METRICS] bsm=%llu miss=%llu ok=%llu fail=%llu "
                "key=%.2fms enroll=%.2fms pseudo=%.2fms "
              "sign=%.2fms(max %.2f) mutex=%.3fms(max %.3f) "
@@ -503,6 +510,11 @@ int main(int argc, char **argv) {
        special value 0 = baseline mode (no provisioning, BSM signing only) */
     int provision_period_sec = PROVISION_PERIOD_SEC;
 
+    /* client id for multi-client support. each client gets its own
+       cert_store_<id>/ directory and ejbca username qnx-vehicle-<id>.
+       defaults to "1" if not specified. */
+    const char *client_id = "1";
+
     if (argc > 1) {
         const char *arg1 = argv[1];
 
@@ -525,19 +537,44 @@ int main(int argc, char **argv) {
                 provision_period_sec = atoi(argv[2]);
                 if (provision_period_sec < 0) provision_period_sec = PROVISION_PERIOD_SEC;
             }
+            /* argv[3]: optional client id for multi-client */
+            if (argc > 3) {
+                client_id = argv[3];
+            }
         } else {
             enroll_url = arg1;
             pseudo_url = argc > 2 ? argv[2] : DEFAULT_PSEUDONYM_URL;
             crl_url = argc > 3 ? argv[3] : DEFAULT_CRL_URL;
             revoke_url = argc > 4 ? argv[4] : DEFAULT_REVOKE_URL;
+            /* argv[5]: optional client id for multi-client (explicit URL mode) */
+            if (argc > 5) {
+                client_id = argv[5];
+            }
         }
     }
 
-    if (ensure_cert_store() != 0) {
-        fprintf(stderr, "failed to initialize certificate storage\n");
+    /* build all per-client runtime paths from the client id */
+    snprintf(g_state.cert_store_dir, sizeof(g_state.cert_store_dir),
+             "./cert_store_%s", client_id);
+    snprintf(g_state.csv_path, sizeof(g_state.csv_path),
+             "%s/metrics.csv", g_state.cert_store_dir);
+    snprintf(g_state.key_path, sizeof(g_state.key_path),
+             "%s/enrollment_key.pem", g_state.cert_store_dir);
+    snprintf(g_state.crl_path, sizeof(g_state.crl_path),
+             "%s/ca.crl.pem", g_state.cert_store_dir);
+    snprintf(g_state.ejbca_username, sizeof(g_state.ejbca_username),
+             "qnx-vehicle-%s", client_id);
+
+    /* also create the shared cert_store for superadmin certs */
+    if (ensure_cert_store(CERT_STORE_DIR) != 0) {
+        fprintf(stderr, "failed to initialize shared certificate storage\n");
         return 1;
     }
-    if (metrics_csv_init(METRICS_CSV_PATH) != 0) {
+    if (ensure_cert_store(g_state.cert_store_dir) != 0) {
+        fprintf(stderr, "failed to initialize client certificate storage: %s\n", g_state.cert_store_dir);
+        return 1;
+    }
+    if (metrics_csv_init(g_state.csv_path) != 0) {
         fprintf(stderr, "failed to initialize metrics csv\n");
         return 1;
     }
@@ -599,14 +636,16 @@ int main(int argc, char **argv) {
     pthread_attr_destroy(&attr_prov);
     pthread_attr_destroy(&attr_mon);
 
-    printf("RTOS client started. enroll=%s pseudo=%s crl=%s revoke=%s\n", enroll_url, pseudo_url, crl_url, revoke_url);
+    printf("RTOS client started. id=%s user=%s\n", client_id, g_state.ejbca_username);
+    printf("  enroll=%s\n  pseudo=%s\n  crl=%s\n  revoke=%s\n", enroll_url, pseudo_url, crl_url, revoke_url);
+    printf("  cert_store=%s\n", g_state.cert_store_dir);
     printf("Thread priorities: signer=%d provision=%d monitor=%d\n",
            PRIO_SIGNER, PRIO_PROVISION, PRIO_MONITOR);
     if (provision_period_sec == 0)
         printf("Mode: BASELINE (BSM signing only, no cloud provisioning)\n");
     else
         printf("Provision interval: %ds | Batch size: %d\n", provision_period_sec, CERT_BATCH_SIZE);
-    printf("Press Ctrl+C to stop. Metrics: %s\n", METRICS_CSV_PATH);
+    printf("Press Ctrl+C to stop. Metrics: %s\n", g_state.csv_path);
 
     pthread_join(signer_tid, NULL);
     pthread_join(prov_tid, NULL);

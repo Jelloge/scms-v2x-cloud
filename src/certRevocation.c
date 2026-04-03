@@ -538,6 +538,9 @@ static int crl_file_is_valid(const char *crl_path) {
  *   0  -> success
  *  -1  -> failure
  */
+static int crl_download_depth = 0;
+#define CRL_MAX_RETRY_DEPTH 2
+
 int crl_download_to_file(const char *url, const char *out_path) {
 	if (!url || !out_path){
         if (DEBUG_CRL){
@@ -545,6 +548,14 @@ int crl_download_to_file(const char *url, const char *out_path) {
         }
 		return -1;
 	}
+
+	if (crl_download_depth >= CRL_MAX_RETRY_DEPTH) {
+		if (DEBUG_CRL) {
+			fprintf(stderr, "[crl] download: max retry depth reached, giving up\n");
+		}
+		return -1;
+	}
+	crl_download_depth++;
 
     // Initialize libcurl
 	CURL *curl = curl_easy_init();
@@ -578,7 +589,10 @@ int crl_download_to_file(const char *url, const char *out_path) {
 
     // Follow HTTP redirects (301/302)
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    
+
+    // Timeout to prevent blocking the signer thread
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
 
 	FILE *ca_check = fopen(TRUSTED_CA_CERT_PATH, "r");
 	if (ca_check) {
@@ -785,6 +799,7 @@ static int cert_is_revoked_by_crl_internal(const char *cert_path, const char *cr
 int crl_refresh_and_check(const char *crl_url, const char *crl_path, const char *cert_path, int *is_revoked) {
 
     fprintf(stderr, "[crl] CRL refresh and check\n");
+    crl_download_depth = 0;  // reset retry depth for each refresh cycle
 
 	if (!crl_url || !crl_path || !cert_path || !is_revoked){
 		if (DEBUG_CRL) {

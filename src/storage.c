@@ -8,11 +8,11 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-int ensure_cert_store(void) {
+int ensure_cert_store(const char *dir) {
 #ifdef _WIN32
-    if (mkdir(CERT_STORE_DIR) == 0 || errno == EEXIST) {
+    if (mkdir(dir) == 0 || errno == EEXIST) {
 #else
-    if (mkdir(CERT_STORE_DIR, 0700) == 0 || errno == EEXIST) {
+    if (mkdir(dir, 0700) == 0 || errno == EEXIST) {
 #endif
         return 0;
     }

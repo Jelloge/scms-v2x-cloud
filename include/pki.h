@@ -10,10 +10,11 @@ typedef struct {
     double pseudonym_ms;
 } pki_cycle_metrics_t;
 
-int generate_enrollment_key_and_csr(const char *common_name);
-int submit_enrollment_request(const char *url);
-int request_pseudonym_batch(const char *url, int batch_size);
+int generate_enrollment_key_and_csr(const char *common_name, const char *cert_store_dir);
+int submit_enrollment_request(const char *url, const char *cert_store_dir, const char *username);
+int request_pseudonym_batch(const char *url, int batch_size, const char *cert_store_dir, const char *username);
 int run_provisioning_cycle(const char *enroll_url, const char *pseudo_url,
+                           const char *cert_store_dir, const char *username,
                            pki_cycle_metrics_t *metrics_out);
 
 //loads the enrollment private key from a pem file so thread 0 can
