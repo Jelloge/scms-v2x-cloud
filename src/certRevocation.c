@@ -230,10 +230,7 @@ static char *percent_encode_query_value(const char *in) {
 	return out;
 }
 
-/* ============================================================
-   URL BUILDING HELPERS
-   ============================================================ */
-
+//   URL BUILDING HELPERS
 /*
  * Builds a retry URL by percent-encoding the existing issuer query value.
  *

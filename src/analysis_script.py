@@ -253,6 +253,13 @@ plt.tight_layout()
 plt.savefig(os.path.join(OUTPUT_DIR, "fig3_deadline_miss_bar.png"), dpi=200)
 plt.close()
 
+# Figure 3: Deadline miss rate
+plt.figure(figsize = (8, 5))
+plt.bar(order, Latency_summary["Deadline_Miss_Rate_PCT"])
+plt.xLabel("Provisioning interval")
+plt.ylabel("Deadline miss rate (%)")
+plt.title("BSM deadline msis rate")
+plt.tight_layout()
 
 # Figure 4: Time series for 3s
 df_3s = raw_latency["3s"].copy()

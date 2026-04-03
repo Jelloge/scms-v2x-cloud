@@ -579,7 +579,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* init shared state */
+    // this is the init shared state 
     pthread_mutex_init(&g_state.lock, NULL);
     pthread_cond_init(&g_state.cert_available, NULL);
     g_state.signing_key = NULL;
@@ -597,9 +597,8 @@ int main(int argc, char **argv) {
 
     signal(SIGINT, on_sigint);
 
-    /* set up thread attributes with priorities. on QNX these will
-       cause preemptive scheduling. on our machines they'll probably fail
-       and fall back to defaults which is fine for testing */
+    // set up thread attributes with priorities. on qnx these will cause preemptive scheduling.
+    // on our machines they'll probably fail and fall back to defaults which is probably fine for testing.
     pthread_attr_t attr_signer, attr_prov, attr_mon;
     pthread_attr_init(&attr_signer);
     pthread_attr_init(&attr_prov);
